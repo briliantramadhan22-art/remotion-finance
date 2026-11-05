@@ -1,0 +1,767 @@
+#!/usr/bin/env bash
+# Update script: replaces the video code with v2 (dark neon style), renders it, and pushes the mp4 to GitHub.
+set -e
+
+cat > src/FinanceVideo.tsx <<'EOF_FV'
+import React from "react";
+import {
+  AbsoluteFill,
+  Audio,
+  Easing,
+  Sequence,
+  interpolate,
+  random,
+  spring,
+  staticFile,
+  useCurrentFrame,
+  useVideoConfig,
+} from "remotion";
+import { loadFont as loadDisplay } from "@remotion/google-fonts/SpaceGrotesk";
+import { loadFont as loadMono } from "@remotion/google-fonts/JetBrainsMono";
+
+/* ------------------------------------------------------------------ */
+/* Config                                                              */
+/* ------------------------------------------------------------------ */
+export const FPS = 30;
+export const WIDTH = 1080;
+export const HEIGHT = 1920;
+
+const SHOW_CAPTIONS = true; // sentence-by-sentence captions, synced to the voiceover
+const USE_AUDIO = false; // set true once public/voice/<scene-id>.mp3 exist
+
+const sec = (n: number) => Math.round(n * FPS);
+
+const display = loadDisplay("normal", { weights: ["500", "700"], subsets: ["latin"] }).fontFamily;
+const mono = loadMono("normal", { weights: ["700"], subsets: ["latin"] }).fontFamily;
+const SANS = `${display}, system-ui, sans-serif`;
+const MONO = `${mono}, ui-monospace, monospace`;
+
+// Dark fintech base, one neon colour per bucket
+const C = {
+  bg: "#070816",
+  card: "#12143A",
+  card2: "#0C0E28",
+  line: "rgba(255,255,255,0.14)",
+  text: "#F4F6FF",
+  muted: "#8A90B8",
+  needs: "#22D3EE", // cyan
+  wants: "#FF3D9A", // pink
+  save: "#B6FF3B", // lime
+  alert: "#FF5A5F",
+  gold: "#FFC93C",
+};
+
+type Segment = { key: string; label: string; pct: number; color: string; items: string[] };
+
+const SEGMENTS: Segment[] = [
+  { key: "needs", label: "Needs", pct: 50, color: C.needs, items: ["Rent", "Food", "Bills"] },
+  { key: "wants", label: "Wants", pct: 30, color: C.wants, items: ["Coffee runs", "Streaming", "Fun stuff"] },
+  { key: "save", label: "Future you", pct: 20, color: C.save, items: ["Savings", "Investing", "Debt payoff"] },
+];
+
+/* ------------------------------------------------------------------ */
+/* Helpers                                                             */
+/* ------------------------------------------------------------------ */
+const clamp = { extrapolateLeft: "clamp", extrapolateRight: "clamp" } as const;
+
+// bouncy = punchy pop with overshoot; otherwise a smooth ease
+const useEnter = (delay = 0, duration = 24, bouncy = false) => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  return bouncy
+    ? spring({ frame: frame - delay, fps, config: { damping: 11, stiffness: 150 } })
+    : spring({ frame: frame - delay, fps, durationInFrames: duration, config: { damping: 200 } });
+};
+
+const one = (p: number) => Math.min(p, 1);
+
+const Background: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const frame = useCurrentFrame();
+  const drift = frame * 0.5;
+  return (
+    <AbsoluteFill style={{ background: C.bg, fontFamily: SANS, color: C.text }}>
+      <AbsoluteFill
+        style={{
+          backgroundImage:
+            "linear-gradient(rgba(120,130,255,0.07) 2px, transparent 2px), linear-gradient(90deg, rgba(120,130,255,0.07) 2px, transparent 2px)",
+          backgroundSize: "90px 90px",
+          backgroundPosition: `${drift}px ${drift}px`,
+        }}
+      />
+      <div
+        style={{
+          position: "absolute",
+          width: 1100,
+          height: 1100,
+          left: -400 + Math.sin(frame / 90) * 60,
+          top: -300 + Math.cos(frame / 110) * 60,
+          background: "radial-gradient(circle, rgba(124,58,237,0.40), transparent 62%)",
+        }}
+      />
+      <div
+        style={{
+          position: "absolute",
+          width: 1100,
+          height: 1100,
+          right: -450 + Math.cos(frame / 100) * 60,
+          bottom: -380 + Math.sin(frame / 120) * 60,
+          background: "radial-gradient(circle, rgba(34,211,238,0.24), transparent 62%)",
+        }}
+      />
+      <AbsoluteFill style={{ background: "radial-gradient(ellipse at center, transparent 55%, rgba(0,0,0,0.55) 100%)" }} />
+      {children}
+    </AbsoluteFill>
+  );
+};
+
+// Each scene fades and scales in/out quickly (Sequence gives the scene's own duration)
+const SceneFrame: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const frame = useCurrentFrame();
+  const { durationInFrames } = useVideoConfig();
+  const opacity = interpolate(frame, [0, 6, durationInFrames - 6, durationInFrames], [0, 1, 1, 0], clamp);
+  const scale = interpolate(frame, [0, 10], [0.96, 1], { ...clamp, easing: Easing.out(Easing.cubic) });
+  return (
+    <AbsoluteFill style={{ opacity }}>
+      <AbsoluteFill style={{ transform: `scale(${scale})` }}>{children}</AbsoluteFill>
+    </AbsoluteFill>
+  );
+};
+
+// [seconds from scene start, caption line]
+type Cap = [number, string];
+
+const Caption: React.FC<{ caps: Cap[] }> = ({ caps }) => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  let idx = 0;
+  caps.forEach(([t], i) => {
+    if (frame >= sec(t)) idx = i;
+  });
+  const pop = spring({ frame: frame - sec(caps[idx][0]), fps, config: { damping: 14, stiffness: 220 } });
+  return (
+    <div style={{ position: "absolute", left: 70, right: 70, bottom: 330, display: "flex", justifyContent: "center" }}>
+      <div
+        key={idx}
+        style={{
+          padding: "20px 38px",
+          borderRadius: 30,
+          background: "rgba(7,8,22,0.78)",
+          border: `2px solid ${C.line}`,
+          fontSize: 52,
+          fontWeight: 700,
+          lineHeight: 1.25,
+          textAlign: "center",
+          opacity: one(pop),
+          transform: `scale(${0.9 + 0.1 * Math.min(pop, 1.15)})`,
+        }}
+      >
+        {caps[idx][1]}
+      </div>
+    </div>
+  );
+};
+
+const CONFETTI = [C.needs, C.wants, C.save, C.gold];
+
+const Confetti: React.FC<{ from: number; to: number }> = ({ from, to }) => {
+  const frame = useCurrentFrame();
+  if (frame < from || frame > to) return null;
+  const t = frame - from;
+  const fade = interpolate(frame, [to - 12, to], [1, 0], clamp);
+  return (
+    <>
+      {Array.from({ length: 28 }, (_, i) => {
+        const color = CONFETTI[i % CONFETTI.length];
+        const size = 18 + random(`cz${i}`) * 18;
+        return (
+          <div
+            key={i}
+            style={{
+              position: "absolute",
+              left: random(`cx${i}`) * WIDTH,
+              top: -80 - random(`cy${i}`) * 500 + t * (16 + random(`cs${i}`) * 12),
+              width: size,
+              height: size * 0.55,
+              background: color,
+              boxShadow: `0 0 12px ${color}`,
+              opacity: fade,
+              transform: `rotate(${t * (random(`cr${i}`) * 24 - 12)}deg)`,
+            }}
+          />
+        );
+      })}
+    </>
+  );
+};
+
+const Coins: React.FC<{ from: number }> = ({ from }) => {
+  const frame = useCurrentFrame();
+  const t = frame - from;
+  if (t < 0 || t > 40) return null;
+  return (
+    <>
+      {Array.from({ length: 12 }, (_, i) => {
+        const angle = random(`ca${i}`) * Math.PI * 2;
+        const dist = interpolate(t, [0, 40], [0, 380 + random(`cd${i}`) * 260], { easing: Easing.out(Easing.cubic) });
+        return (
+          <div
+            key={i}
+            style={{
+              position: "absolute",
+              left: "50%",
+              top: "50%",
+              width: 44,
+              height: 44,
+              marginLeft: -22,
+              marginTop: -22,
+              borderRadius: 22,
+              background: "radial-gradient(circle at 35% 30%, #FFF3B0, #FFC93C 60%, #E39A00)",
+              boxShadow: `0 0 18px ${C.gold}99`,
+              opacity: interpolate(t, [24, 40], [1, 0], clamp),
+              transform: `translate(${Math.cos(angle) * dist}px, ${Math.sin(angle) * dist - t * 1.5}px)`,
+            }}
+          />
+        );
+      })}
+    </>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Scene 1 - Hook: rich on payday, broke by day 3                      */
+/* ------------------------------------------------------------------ */
+const Hook: React.FC = () => {
+  const frame = useCurrentFrame();
+  const pop = Math.min(useEnter(0, 0, true), 1.2);
+  const sub = useEnter(24);
+  const poof = useEnter(90, 0, true);
+  const draining = frame >= 66;
+  const done = frame >= 90;
+  const amount = Math.round(interpolate(frame, [66, 90], [3000, 0], { ...clamp, easing: Easing.in(Easing.cubic) }));
+  const shake = draining && frame < 108 ? Math.sin(frame * 2.4) * interpolate(frame, [66, 90], [3, 18], clamp) : 0;
+  const color = done ? C.alert : draining ? C.wants : C.needs;
+
+  return (
+    <AbsoluteFill style={{ alignItems: "center", justifyContent: "center", paddingBottom: 220 }}>
+      <Confetti from={4} to={64} />
+      <div
+        style={{
+          position: "relative",
+          width: 900,
+          padding: "52px 56px 60px",
+          borderRadius: 48,
+          background: `linear-gradient(145deg, ${C.card}, ${C.card2})`,
+          border: `2px solid ${color}88`,
+          boxShadow: `0 0 90px ${color}44, inset 0 0 40px rgba(255,255,255,0.03)`,
+          transform: `translateX(${shake}px) scale(${pop})`,
+        }}
+      >
+        <div
+          style={{
+            display: "inline-block",
+            padding: "10px 26px",
+            borderRadius: 999,
+            border: `2px solid ${color}`,
+            color,
+            fontSize: 40,
+            fontWeight: 700,
+          }}
+        >
+          {draining ? "Day 3" : "Payday!"}
+        </div>
+        <div style={{ marginTop: 28, fontSize: 40, color: C.muted, fontWeight: 500 }}>Balance</div>
+        <div
+          style={{
+            fontFamily: MONO,
+            fontWeight: 700,
+            fontSize: 190,
+            lineHeight: 1.1,
+            color: done ? C.alert : C.text,
+            textShadow: `0 0 40px ${color}88`,
+          }}
+        >
+          ${amount.toLocaleString("en-US")}
+        </div>
+        <Coins from={66} />
+      </div>
+      <div style={{ marginTop: 90, height: 190, display: "flex", alignItems: "center" }}>
+        {done ? (
+          <div
+            style={{
+              fontWeight: 700,
+              fontSize: 160,
+              color: C.alert,
+              textShadow: `0 0 50px ${C.alert}88`,
+              opacity: one(poof),
+              transform: `scale(${0.6 + 0.4 * Math.min(poof, 1.2)})`,
+            }}
+          >
+            Poof.
+          </div>
+        ) : (
+          <div style={{ fontSize: 56, fontWeight: 700, color: C.wants, opacity: sub }}>Feeling like a millionaire</div>
+        )}
+      </div>
+    </AbsoluteFill>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Scene 2 - Problem: spend first, save the crumbs                     */
+/* ------------------------------------------------------------------ */
+const BudgetCard: React.FC<{
+  p: number;
+  fill: number;
+  title: string;
+  amount: string;
+  color: string;
+}> = ({ p, fill, title, amount, color }) => (
+  <div
+    style={{
+      width: 920,
+      padding: "34px 44px 42px",
+      borderRadius: 40,
+      background: `linear-gradient(145deg, ${C.card}, ${C.card2})`,
+      border: `2px solid ${color}88`,
+      boxShadow: `0 0 50px ${color}33`,
+      opacity: one(p),
+      transform: `scale(${0.8 + 0.2 * Math.min(p, 1.1)})`,
+    }}
+  >
+    <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+      <span style={{ fontSize: 66, fontWeight: 700 }}>{title}</span>
+      <span style={{ fontFamily: MONO, fontWeight: 700, fontSize: 60, color }}>{amount}</span>
+    </div>
+    <div style={{ marginTop: 24, height: 44, borderRadius: 22, background: "rgba(255,255,255,0.08)" }}>
+      <div
+        style={{
+          width: `${fill * 100}%`,
+          height: "100%",
+          borderRadius: 22,
+          background: color,
+          boxShadow: `0 0 26px ${color}`,
+        }}
+      />
+    </div>
+  </div>
+);
+
+const Problem: React.FC = () => {
+  const frame = useCurrentFrame();
+  const a = useEnter(4, 0, true);
+  const aFill = useEnter(10, 20);
+  const b = useEnter(54, 0, true);
+  const bFill = useEnter(60, 20);
+  const y = useEnter(108, 0, true);
+  const yShake = frame >= 108 && frame < 132 ? Math.sin(frame * 3) * 10 : 0;
+  return (
+    <AbsoluteFill style={{ alignItems: "center", justifyContent: "center", paddingBottom: 200, gap: 44 }}>
+      <BudgetCard p={a} fill={aFill} title="Spend first" amount="$2,988" color={C.wants} />
+      <BudgetCard p={b} fill={0.04 * bFill} title="Save the crumbs" amount="$12" color={C.save} />
+      <div
+        style={{
+          marginTop: 30,
+          fontWeight: 700,
+          fontSize: 170,
+          color: C.alert,
+          textShadow: `0 0 50px ${C.alert}88`,
+          opacity: one(y),
+          transform: `translateX(${yShake}px) scale(${0.5 + 0.5 * Math.min(y, 1.2)})`,
+        }}
+      >
+        Yikes.
+      </div>
+    </AbsoluteFill>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Scenes 3-5 - The rule: a neon donut fills one bucket per scene      */
+/* ------------------------------------------------------------------ */
+const R = 250;
+const SW = 56;
+const CIRC = 2 * Math.PI * R;
+const SEG_GAP = 10;
+const STARTS = [0, 50, 80];
+
+const Donut: React.FC<{ active: number; at: number }> = ({ active, at }) => {
+  const frame = useCurrentFrame();
+  const grow = useEnter(at, 34);
+  const pulse = 0.75 + 0.25 * Math.sin(frame / 5);
+  return (
+    <svg width={600} height={600} viewBox="0 0 600 600" style={{ overflow: "visible" }}>
+      <g transform="rotate(-90 300 300)">
+        {SEGMENTS.map((seg, i) => {
+          const len = (seg.pct / 100) * CIRC - SEG_GAP;
+          const off = -(STARTS[i] / 100) * CIRC;
+          const fill = i < active ? 1 : i === active ? grow : 0;
+          return (
+            <React.Fragment key={seg.key}>
+              <circle
+                cx={300}
+                cy={300}
+                r={R}
+                fill="none"
+                stroke={seg.color}
+                strokeOpacity={0.16}
+                strokeWidth={SW}
+                strokeDasharray={`${len} ${CIRC}`}
+                strokeDashoffset={off}
+              />
+              <circle
+                cx={300}
+                cy={300}
+                r={R}
+                fill="none"
+                stroke={seg.color}
+                strokeWidth={SW}
+                strokeDasharray={`${Math.max(len * fill, 0)} ${CIRC}`}
+                strokeDashoffset={off}
+                style={{ filter: `drop-shadow(0 0 ${i === active ? 22 * pulse : 10}px ${seg.color})` }}
+              />
+            </React.Fragment>
+          );
+        })}
+      </g>
+    </svg>
+  );
+};
+
+const Chip: React.FC<{ text: string; color: string; delay: number }> = ({ text, color, delay }) => {
+  const p = useEnter(delay, 0, true);
+  return (
+    <div
+      style={{
+        padding: "20px 56px",
+        borderRadius: 999,
+        border: `3px solid ${color}`,
+        background: `${color}14`,
+        color: C.text,
+        fontSize: 56,
+        fontWeight: 700,
+        boxShadow: `0 0 28px ${color}55, inset 0 0 18px ${color}22`,
+        opacity: one(p),
+        transform: `scale(${0.5 + 0.5 * p}) translateY(${(1 - one(p)) * 30}px)`,
+      }}
+    >
+      {text}
+    </div>
+  );
+};
+
+const RuleScene: React.FC<{
+  index: number;
+  pctAt: number;
+  chipsAt: number;
+  gap: number;
+  intro?: boolean;
+  confettiAt?: number;
+}> = ({ index, pctAt, chipsAt, gap, intro, confettiAt }) => {
+  const seg = SEGMENTS[index];
+  const frame = useCurrentFrame();
+  const pct = Math.round(
+    interpolate(frame, [pctAt, pctAt + 32], [0, seg.pct], { ...clamp, easing: Easing.out(Easing.cubic) })
+  );
+  const numOpacity = interpolate(frame, [pctAt, pctAt + 6], [0, 1], clamp);
+  const introOpacity = intro ? interpolate(frame, [0, 8, pctAt - 8, pctAt], [0, 1, 1, 0], clamp) : 0;
+  const label = one(useEnter(pctAt + 6, 0, true));
+
+  return (
+    <AbsoluteFill style={{ alignItems: "center", paddingTop: 230 }}>
+      {confettiAt !== undefined && <Confetti from={confettiAt} to={confettiAt + 56} />}
+      <div style={{ position: "relative", width: 600, height: 600 }}>
+        <Donut active={index} at={pctAt} />
+        <div
+          style={{
+            position: "absolute",
+            inset: 0,
+            display: "flex",
+            flexDirection: "column",
+            alignItems: "center",
+            justifyContent: "center",
+          }}
+        >
+          {intro && (
+            <div style={{ position: "absolute", fontFamily: MONO, fontWeight: 700, fontSize: 78, opacity: introOpacity }}>
+              50/30/20
+            </div>
+          )}
+          <div
+            style={{
+              fontFamily: MONO,
+              fontWeight: 700,
+              fontSize: 150,
+              lineHeight: 1,
+              color: seg.color,
+              opacity: numOpacity,
+              textShadow: `0 0 36px ${seg.color}99`,
+            }}
+          >
+            {pct}%
+          </div>
+          <div style={{ fontSize: 50, fontWeight: 700, opacity: label }}>{seg.label}</div>
+        </div>
+      </div>
+      <div style={{ marginTop: 70, display: "flex", flexDirection: "column", gap: 24, alignItems: "center" }}>
+        {seg.items.map((text, i) => (
+          <Chip key={text} text={text} color={seg.color} delay={chipsAt + i * gap} />
+        ))}
+      </div>
+    </AbsoluteFill>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Scene 6 - Example: $3,000 paycheck                                  */
+/* ------------------------------------------------------------------ */
+const Row: React.FC<{ seg: Segment; label: string; amount: number; delay: number }> = ({
+  seg,
+  label,
+  amount,
+  delay,
+}) => {
+  const p = useEnter(delay, 0, true);
+  const fill = useEnter(delay + 4, 28);
+  const op = one(p);
+  const value = Math.round(amount * fill);
+  return (
+    <div
+      style={{
+        width: 920,
+        padding: "30px 44px 38px",
+        borderRadius: 36,
+        background: `linear-gradient(145deg, ${C.card}, ${C.card2})`,
+        border: `2px solid ${seg.color}88`,
+        boxShadow: `0 0 40px ${seg.color}33`,
+        opacity: op,
+        transform: `translateX(${(1 - op) * -120}px) scale(${0.9 + 0.1 * Math.min(p, 1.1)})`,
+      }}
+    >
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <div style={{ display: "flex", alignItems: "baseline", gap: 22 }}>
+          <span style={{ fontSize: 58, fontWeight: 700 }}>{label}</span>
+          <span style={{ fontSize: 40, fontWeight: 500, color: C.muted }}>{seg.pct}%</span>
+        </div>
+        <span
+          style={{
+            fontFamily: MONO,
+            fontWeight: 700,
+            fontSize: 80,
+            color: seg.color,
+            textShadow: `0 0 28px ${seg.color}88`,
+          }}
+        >
+          ${value.toLocaleString("en-US")}
+        </span>
+      </div>
+      <div style={{ marginTop: 20, height: 24, borderRadius: 12, background: "rgba(255,255,255,0.08)" }}>
+        <div
+          style={{
+            width: `${seg.pct * fill}%`,
+            height: "100%",
+            borderRadius: 12,
+            background: seg.color,
+            boxShadow: `0 0 22px ${seg.color}`,
+          }}
+        />
+      </div>
+    </div>
+  );
+};
+
+const Example: React.FC = () => {
+  const head = useEnter(0, 0, true);
+  const delays = [72, 132, 183]; // "fifteen hundred" / "nine hundred" / "six hundred"
+  const labels = ["Needs", "Fun", "Future you"];
+  return (
+    <AbsoluteFill style={{ alignItems: "center", paddingTop: 240 }}>
+      <div style={{ fontSize: 52, color: C.muted, fontWeight: 500, opacity: one(head) }}>Your paycheck</div>
+      <div
+        style={{
+          fontFamily: MONO,
+          fontWeight: 700,
+          fontSize: 180,
+          lineHeight: 1.1,
+          textShadow: `0 0 50px ${C.needs}88`,
+          transform: `scale(${0.6 + 0.4 * Math.min(head, 1.2)})`,
+        }}
+      >
+        $3,000
+      </div>
+      <div style={{ marginTop: 70, display: "flex", flexDirection: "column", gap: 40 }}>
+        {SEGMENTS.map((seg, i) => (
+          <Row key={seg.key} seg={seg} label={labels[i]} amount={(3000 * seg.pct) / 100} delay={delays[i]} />
+        ))}
+      </div>
+    </AbsoluteFill>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Scene 7 - CTA                                                       */
+/* ------------------------------------------------------------------ */
+const Outro: React.FC = () => {
+  const frame = useCurrentFrame();
+  const a = useEnter(4, 0, true);
+  const b = useEnter(48, 0, true);
+  const pulse = 0.6 + 0.4 * Math.sin(frame / 4);
+  return (
+    <AbsoluteFill
+      style={{ alignItems: "center", justifyContent: "center", textAlign: "center", padding: "0 80px 260px" }}
+    >
+      <div
+        style={{
+          fontWeight: 700,
+          fontSize: 138,
+          lineHeight: 1.05,
+          opacity: one(a),
+          textShadow: `0 0 50px ${C.needs}88`,
+          transform: `scale(${0.6 + 0.4 * Math.min(a, 1.2)})`,
+        }}
+      >
+        Try it this month.
+      </div>
+      <div
+        style={{
+          marginTop: 90,
+          padding: "30px 64px",
+          borderRadius: 999,
+          background: C.save,
+          color: C.bg,
+          fontWeight: 700,
+          fontSize: 52,
+          opacity: one(b),
+          boxShadow: `0 0 ${30 + 50 * pulse}px ${C.save}, 0 0 90px ${C.save}66`,
+          transform: `scale(${0.5 + 0.5 * Math.min(b, 1.2)})`,
+        }}
+      >
+        Follow for more money tips
+      </div>
+      <div
+        style={{
+          position: "absolute",
+          bottom: 150,
+          fontSize: 28,
+          fontWeight: 500,
+          color: C.muted,
+          opacity: one(b),
+        }}
+      >
+        Educational content, not financial advice.
+      </div>
+    </AbsoluteFill>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Timeline: single source of truth for timing + narration             */
+/* start/end are seconds; caps are [seconds from scene start, line].   */
+/* Adjust after you record the real voiceover.                         */
+/* ------------------------------------------------------------------ */
+type SceneDef = { id: string; start: number; end: number; caps: Cap[]; view: React.ReactNode };
+
+export const SCENES: SceneDef[] = [
+  {
+    id: "hook",
+    start: 0,
+    end: 4,
+    caps: [
+      [0, "Payday."],
+      [0.8, "You feel like a millionaire."],
+      [2.2, "Day three?"],
+      [3.0, "Poof. Gone."],
+    ],
+    view: <Hook />,
+  },
+  {
+    id: "problem",
+    start: 4,
+    end: 9,
+    caps: [
+      [0, "Most of us spend first"],
+      [1.8, "and save the crumbs."],
+      [3.6, "Yikes."],
+    ],
+    view: <Problem />,
+  },
+  {
+    id: "needs",
+    start: 9,
+    end: 16,
+    caps: [
+      [0, "Enter the 50/30/20 rule."],
+      [2.4, "Fifty percent for needs."],
+      [4.2, "Rent, food, bills."],
+      [5.8, "The boring grown-up stuff."],
+    ],
+    view: <RuleScene index={0} pctAt={72} chipsAt={126} gap={18} intro />,
+  },
+  {
+    id: "wants",
+    start: 16,
+    end: 22,
+    caps: [
+      [0, "Thirty percent for wants."],
+      [1.7, "Coffee runs, streaming, fun stuff."],
+      [3.6, "Yes, you're allowed to have fun."],
+    ],
+    view: <RuleScene index={1} pctAt={4} chipsAt={54} gap={22} />,
+  },
+  {
+    id: "savings",
+    start: 22,
+    end: 28,
+    caps: [
+      [0, "Twenty percent goes to future you."],
+      [2.4, "Future you says thanks."],
+      [3.9, "Savings, investing, paying off debt."],
+    ],
+    view: <RuleScene index={2} pctAt={4} chipsAt={120} gap={20} confettiAt={72} />,
+  },
+  {
+    id: "example",
+    start: 28,
+    end: 36,
+    caps: [
+      [0, "Say you make three thousand."],
+      [2.4, "Fifteen hundred for needs."],
+      [4.4, "Nine hundred for fun."],
+      [6.1, "Six hundred for future you."],
+    ],
+    view: <Example />,
+  },
+  {
+    id: "cta",
+    start: 36,
+    end: 40,
+    caps: [
+      [0, "Try it this month."],
+      [1.6, "Follow for more money tips."],
+    ],
+    view: <Outro />,
+  },
+];
+
+export const TOTAL_FRAMES = sec(SCENES[SCENES.length - 1].end); // 1200 frames = 40s
+
+export const FinanceVideo: React.FC = () => (
+  <Background>
+    {SCENES.map((sc) => (
+      <Sequence key={sc.id} name={sc.id} from={sec(sc.start)} durationInFrames={sec(sc.end - sc.start)}>
+        <SceneFrame>{sc.view}</SceneFrame>
+        {SHOW_CAPTIONS && <Caption caps={sc.caps} />}
+        {USE_AUDIO && <Audio src={staticFile(`voice/${sc.id}.mp3`)} />}
+      </Sequence>
+    ))}
+  </Background>
+);
+EOF_FV
+
+npx remotion render src/index.ts FinanceVideo out/finance-v2.mp4
+
+git add out/finance-v2.mp4
+git commit -m "video v2"
+git push
+
+echo
+echo "Done. Open the repo on github.com -> out -> finance-v2.mp4"
