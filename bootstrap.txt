@@ -1,0 +1,507 @@
+#!/usr/bin/env bash
+# One-file setup for GitHub Codespaces: writes the project files, installs deps, downloads Chrome.
+set -e
+
+mkdir -p src public/voice out
+
+cat > src/index.ts <<'EOF_index_ts'
+import { registerRoot } from "remotion";
+import { RemotionRoot } from "./Root";
+
+registerRoot(RemotionRoot);
+EOF_index_ts
+
+cat > src/Root.tsx <<'EOF_Root_tsx'
+import React from "react";
+import { Composition } from "remotion";
+import { FinanceVideo, FPS, HEIGHT, TOTAL_FRAMES, WIDTH } from "./FinanceVideo";
+
+export const RemotionRoot: React.FC = () => (
+  <Composition
+    id="FinanceVideo"
+    component={FinanceVideo}
+    durationInFrames={TOTAL_FRAMES}
+    fps={FPS}
+    width={WIDTH}
+    height={HEIGHT}
+  />
+);
+EOF_Root_tsx
+
+cat > src/FinanceVideo.tsx <<'EOF_FinanceVideo_tsx'
+import React from "react";
+import {
+  AbsoluteFill,
+  Audio,
+  Easing,
+  Sequence,
+  interpolate,
+  spring,
+  staticFile,
+  useCurrentFrame,
+  useVideoConfig,
+} from "remotion";
+import { loadFont as loadSerif } from "@remotion/google-fonts/Fraunces";
+import { loadFont as loadSans } from "@remotion/google-fonts/Manrope";
+
+/* ------------------------------------------------------------------ */
+/* Config                                                              */
+/* ------------------------------------------------------------------ */
+export const FPS = 30;
+export const WIDTH = 1080;
+export const HEIGHT = 1920;
+
+const SHOW_CAPTIONS = true; // burned-in captions (good for muted autoplay)
+const USE_AUDIO = false; // set true once public/voice/<scene-id>.mp3 exist
+
+const sec = (n: number) => Math.round(n * FPS);
+
+const serif = loadSerif("normal", { weights: ["700", "900"], subsets: ["latin"] }).fontFamily;
+const sans = loadSans("normal", { weights: ["500", "700"], subsets: ["latin"] }).fontFamily;
+const DISPLAY = `${serif}, Georgia, serif`;
+const BODY = `${sans}, system-ui, sans-serif`;
+
+// Banknote palette: pale paper, engraving ink, one colour per budget bucket
+const C = {
+  paper: "#DDE8D5",
+  ink: "#14301F",
+  muted: "#4F6B58",
+  track: "#C3D4BE",
+  needs: "#23468F",
+  wants: "#C94A1E",
+  save: "#0B7A43",
+  alert: "#B3261E",
+};
+
+type Segment = { key: string; label: string; pct: number; color: string; items: string[] };
+
+const SEGMENTS: Segment[] = [
+  { key: "needs", label: "Needs", pct: 50, color: C.needs, items: ["Rent", "Food", "Bills", "Transport"] },
+  { key: "wants", label: "Wants", pct: 30, color: C.wants, items: ["Dining out", "Subscriptions", "Fun"] },
+  { key: "save", label: "Savings", pct: 20, color: C.save, items: ["Savings", "Investments", "Paying off debt"] },
+];
+
+/* ------------------------------------------------------------------ */
+/* Helpers                                                             */
+/* ------------------------------------------------------------------ */
+const clamp = { extrapolateLeft: "clamp", extrapolateRight: "clamp" } as const;
+
+const useEnter = (delay = 0, duration = 24) => {
+  const frame = useCurrentFrame();
+  const { fps } = useVideoConfig();
+  return spring({ frame: frame - delay, fps, durationInFrames: duration, config: { damping: 200 } });
+};
+
+// Banknote frame stays on screen across all scenes
+const Banknote: React.FC<{ children: React.ReactNode }> = ({ children }) => (
+  <AbsoluteFill
+    style={{
+      background: `repeating-linear-gradient(135deg, rgba(20,48,31,0.045) 0 2px, transparent 2px 16px), ${C.paper}`,
+      fontFamily: BODY,
+      color: C.ink,
+    }}
+  >
+    <div style={{ position: "absolute", inset: 40, border: `4px solid ${C.ink}`, borderRadius: 24, opacity: 0.35 }} />
+    <div style={{ position: "absolute", inset: 58, border: `2px solid ${C.ink}`, borderRadius: 14, opacity: 0.25 }} />
+    {children}
+  </AbsoluteFill>
+);
+
+// Fades each scene's content in/out (Sequence gives us the scene's own duration)
+const Fade: React.FC<{ children: React.ReactNode }> = ({ children }) => {
+  const frame = useCurrentFrame();
+  const { durationInFrames } = useVideoConfig();
+  const opacity = interpolate(frame, [0, 8, durationInFrames - 8, durationInFrames], [0, 1, 1, 0], clamp);
+  return <AbsoluteFill style={{ opacity }}>{children}</AbsoluteFill>;
+};
+
+const Caption: React.FC<{ text: string }> = ({ text }) => {
+  const p = useEnter(4, 14);
+  return (
+    <div
+      style={{
+        position: "absolute",
+        left: 100,
+        right: 100,
+        bottom: 330, // keeps clear of TikTok/Reels/Shorts UI
+        textAlign: "center",
+        fontSize: 46,
+        fontWeight: 700,
+        lineHeight: 1.3,
+        opacity: p,
+      }}
+    >
+      {text}
+    </div>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Scene 1 - Hook: paycheck drains to $0                               */
+/* ------------------------------------------------------------------ */
+const Hook: React.FC = () => {
+  const frame = useCurrentFrame();
+  const amount = Math.round(
+    interpolate(frame, [20, 90], [3000, 0], { ...clamp, easing: Easing.inOut(Easing.cubic) })
+  );
+  const q = useEnter(84);
+  return (
+    <AbsoluteFill style={{ alignItems: "center", justifyContent: "center", paddingBottom: 200 }}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 84 }}>Payday</div>
+      <div
+        style={{
+          fontFamily: DISPLAY,
+          fontWeight: 900,
+          fontSize: 220,
+          lineHeight: 1.1,
+          color: amount === 0 ? C.alert : C.ink,
+        }}
+      >
+        ${amount.toLocaleString("en-US")}
+      </div>
+      <div style={{ fontSize: 64, fontWeight: 700, marginTop: 30, opacity: q }}>Where did it go?</div>
+    </AbsoluteFill>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Scene 2 - Problem: spend first, save what's left                    */
+/* ------------------------------------------------------------------ */
+const Problem: React.FC = () => {
+  const a = useEnter(4);
+  const b = useEnter(50);
+  const strike = useEnter(100, 14);
+  const c = useEnter(106);
+
+  const line = (p: number, text: string) => (
+    <div style={{ position: "relative", opacity: p, fontFamily: DISPLAY, fontWeight: 700, fontSize: 96 }}>
+      {text}
+      <div
+        style={{
+          position: "absolute",
+          left: 0,
+          top: "54%",
+          height: 10,
+          width: `${strike * 100}%`,
+          background: C.alert,
+        }}
+      />
+    </div>
+  );
+
+  return (
+    <AbsoluteFill style={{ alignItems: "center", justifyContent: "center", paddingBottom: 200, gap: 36 }}>
+      {line(a, "Spend first.")}
+      {line(b, "Save what's left.")}
+      <div
+        style={{
+          marginTop: 80,
+          fontFamily: DISPLAY,
+          fontWeight: 900,
+          fontSize: 150,
+          color: C.alert,
+          opacity: c,
+        }}
+      >
+        Backwards.
+      </div>
+    </AbsoluteFill>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Scenes 3-5 - The rule: one bucket per scene                         */
+/* ------------------------------------------------------------------ */
+const SplitBar: React.FC<{ active: number; at: number }> = ({ active, at }) => {
+  const grow = useEnter(at, 36);
+  return (
+    <div
+      style={{
+        display: "flex",
+        width: 920,
+        height: 64,
+        borderRadius: 12,
+        overflow: "hidden",
+        border: `3px solid ${C.ink}`,
+        background: C.track,
+        boxSizing: "border-box",
+      }}
+    >
+      {SEGMENTS.map((seg, i) => {
+        const fill = i < active ? 1 : i === active ? grow : 0;
+        return (
+          <div
+            key={seg.key}
+            style={{
+              flex: seg.pct,
+              borderRight: i < SEGMENTS.length - 1 ? `3px solid ${C.ink}` : undefined,
+              boxSizing: "border-box",
+            }}
+          >
+            <div style={{ width: `${fill * 100}%`, height: "100%", background: seg.color }} />
+          </div>
+        );
+      })}
+    </div>
+  );
+};
+
+const Item: React.FC<{ text: string; color: string; delay: number }> = ({ text, color, delay }) => {
+  const p = useEnter(delay, 16);
+  return (
+    <div
+      style={{
+        display: "flex",
+        alignItems: "center",
+        gap: 24,
+        fontSize: 58,
+        fontWeight: 700,
+        opacity: p,
+        transform: `translateX(${(1 - p) * -40}px)`,
+      }}
+    >
+      <div style={{ width: 14, height: 14, borderRadius: 7, background: color }} />
+      {text}
+    </div>
+  );
+};
+
+const RuleScene: React.FC<{ index: number; pctAt: number; itemsAt: number; gap: number }> = ({
+  index,
+  pctAt,
+  itemsAt,
+  gap,
+}) => {
+  const seg = SEGMENTS[index];
+  const frame = useCurrentFrame();
+  const pct = Math.round(
+    interpolate(frame, [pctAt, pctAt + 30], [0, seg.pct], { ...clamp, easing: Easing.out(Easing.cubic) })
+  );
+  const pctOpacity = interpolate(frame, [pctAt, pctAt + 8], [0, 1], clamp);
+  const label = useEnter(pctAt + 8);
+  const intro = interpolate(frame, [0, 10, 58, 68], [0, 1, 1, 0], clamp); // "50/30/20" title, first scene only
+
+  return (
+    <AbsoluteFill style={{ alignItems: "center", paddingTop: 230 }}>
+      <SplitBar active={index} at={pctAt} />
+
+      {index === 0 && (
+        <div
+          style={{
+            position: "absolute",
+            top: 459,
+            left: 0,
+            right: 0,
+            textAlign: "center",
+            fontFamily: DISPLAY,
+            fontWeight: 900,
+            fontSize: 190,
+            lineHeight: 1,
+            opacity: intro,
+          }}
+        >
+          50/30/20
+        </div>
+      )}
+
+      <div
+        style={{
+          marginTop: 110,
+          fontFamily: DISPLAY,
+          fontWeight: 900,
+          fontSize: 300,
+          lineHeight: 1,
+          color: seg.color,
+          opacity: pctOpacity,
+        }}
+      >
+        {pct}%
+      </div>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 700, fontSize: 100, opacity: label }}>{seg.label}</div>
+
+      <div style={{ marginTop: 56, display: "flex", flexDirection: "column", gap: 22, alignItems: "flex-start" }}>
+        {seg.items.map((text, i) => (
+          <Item key={text} text={text} color={seg.color} delay={itemsAt + i * gap} />
+        ))}
+      </div>
+    </AbsoluteFill>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Scene 6 - Example: $3,000 paycheck                                  */
+/* ------------------------------------------------------------------ */
+const Row: React.FC<{ seg: (typeof SEGMENTS)[number]; amount: number; delay: number }> = ({
+  seg,
+  amount,
+  delay,
+}) => {
+  const p = useEnter(delay, 26);
+  const value = Math.round(amount * p);
+  return (
+    <div style={{ width: 920, opacity: p }}>
+      <div style={{ display: "flex", justifyContent: "space-between", alignItems: "baseline" }}>
+        <span style={{ fontSize: 60, fontWeight: 700 }}>{seg.label}</span>
+        <span style={{ fontFamily: DISPLAY, fontWeight: 900, fontSize: 84, color: seg.color }}>
+          ${value.toLocaleString("en-US")}
+        </span>
+      </div>
+      <div style={{ marginTop: 14, height: 28, borderRadius: 14, background: C.track }}>
+        <div style={{ width: `${seg.pct * p}%`, height: "100%", borderRadius: 14, background: seg.color }} />
+      </div>
+    </div>
+  );
+};
+
+const Example: React.FC = () => {
+  const head = useEnter(0);
+  const delays = [80, 130, 185]; // lines up with "fifteen hundred / nine hundred / six hundred"
+  return (
+    <AbsoluteFill style={{ alignItems: "center", paddingTop: 250 }}>
+      <div style={{ fontFamily: DISPLAY, fontWeight: 900, fontSize: 210, lineHeight: 1, opacity: head }}>$3,000</div>
+      <div style={{ fontSize: 56, fontWeight: 700, color: C.muted, marginTop: 8, opacity: head }}>one paycheck</div>
+      <div style={{ marginTop: 100, display: "flex", flexDirection: "column", gap: 60 }}>
+        {SEGMENTS.map((seg, i) => (
+          <Row key={seg.key} seg={seg} amount={(3000 * seg.pct) / 100} delay={delays[i]} />
+        ))}
+      </div>
+    </AbsoluteFill>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Scene 7 - CTA                                                       */
+/* ------------------------------------------------------------------ */
+const Outro: React.FC = () => {
+  const a = useEnter(4);
+  const b = useEnter(36);
+  const c = useEnter(78);
+  const big: React.CSSProperties = {
+    fontFamily: DISPLAY,
+    fontWeight: 900,
+    fontSize: 124,
+    lineHeight: 1.05,
+    padding: "0 100px",
+  };
+  return (
+    <AbsoluteFill style={{ alignItems: "center", justifyContent: "center", paddingBottom: 260, textAlign: "center" }}>
+      <div style={{ ...big, color: C.save, opacity: a }}>Start with 20%.</div>
+      <div style={{ ...big, marginTop: 28, opacity: b }}>Pay yourself first.</div>
+      <div style={{ fontSize: 54, fontWeight: 700, marginTop: 70, opacity: c }}>Follow for more money tips.</div>
+      <div style={{ position: "absolute", bottom: 150, fontSize: 28, fontWeight: 500, color: C.muted, opacity: c }}>
+        Educational content, not financial advice.
+      </div>
+    </AbsoluteFill>
+  );
+};
+
+/* ------------------------------------------------------------------ */
+/* Timeline: single source of truth for timing + narration             */
+/* Adjust start/end (seconds) after you record the real voiceover.     */
+/* ------------------------------------------------------------------ */
+type SceneDef = { id: string; start: number; end: number; text: string; view: React.ReactNode };
+
+export const SCENES: SceneDef[] = [
+  {
+    id: "hook",
+    start: 0,
+    end: 4,
+    text: "Your paycheck lands. And somehow, it's gone. Where did it go?",
+    view: <Hook />,
+  },
+  {
+    id: "problem",
+    start: 4,
+    end: 9,
+    text: "Most people spend first, and save whatever is left. That's backwards.",
+    view: <Problem />,
+  },
+  {
+    id: "needs",
+    start: 9,
+    end: 16,
+    text: "Try the fifty-thirty-twenty rule. Fifty percent goes to needs: rent, food, bills, and transport.",
+    view: <RuleScene index={0} pctAt={70} itemsAt={130} gap={20} />,
+  },
+  {
+    id: "wants",
+    start: 16,
+    end: 22,
+    text: "Thirty percent is for wants. Dining out, subscriptions, and fun. Yes, you're allowed to enjoy it.",
+    view: <RuleScene index={1} pctAt={5} itemsAt={70} gap={24} />,
+  },
+  {
+    id: "savings",
+    start: 22,
+    end: 28,
+    text: "The last twenty percent is for you. Savings, investments, and paying off debt.",
+    view: <RuleScene index={2} pctAt={5} itemsAt={75} gap={30} />,
+  },
+  {
+    id: "example",
+    start: 28,
+    end: 36,
+    text: "On a three-thousand-dollar paycheck, that's fifteen hundred for needs, nine hundred for wants, and six hundred for your future.",
+    view: <Example />,
+  },
+  {
+    id: "cta",
+    start: 36,
+    end: 40,
+    text: "Start small. Pay yourself first. Follow for more money tips.",
+    view: <Outro />,
+  },
+];
+
+export const TOTAL_FRAMES = sec(SCENES[SCENES.length - 1].end); // 1200 frames = 40s
+
+export const FinanceVideo: React.FC = () => (
+  <Banknote>
+    {SCENES.map((sc) => (
+      <Sequence key={sc.id} name={sc.id} from={sec(sc.start)} durationInFrames={sec(sc.end - sc.start)}>
+        <Fade>
+          {sc.view}
+          {SHOW_CAPTIONS && <Caption text={sc.text} />}
+        </Fade>
+        {USE_AUDIO && <Audio src={staticFile(`voice/${sc.id}.mp3`)} />}
+      </Sequence>
+    ))}
+  </Banknote>
+);
+EOF_FinanceVideo_tsx
+
+cat > tsconfig.json <<'EOF_TSCONFIG'
+{
+  "compilerOptions": {
+    "target": "ES2018",
+    "module": "commonjs",
+    "moduleResolution": "node",
+    "jsx": "react-jsx",
+    "strict": true,
+    "noEmit": true,
+    "skipLibCheck": true,
+    "esModuleInterop": true
+  }
+}
+EOF_TSCONFIG
+
+printf 'node_modules\n' > .gitignore
+
+# System libraries Chrome needs (package name differs between Ubuntu versions)
+sudo apt-get update
+sudo apt-get install -y libnss3 libdbus-1-3 libatk1.0-0 libatk-bridge2.0-0 libgbm-dev \
+  libxrandr2 libxkbcommon-x11-0 libxfixes3 libxcomposite1 libxdamage1 libcups2 \
+  libpango-1.0-0 libcairo2 ffmpeg
+sudo apt-get install -y libasound2t64 || sudo apt-get install -y libasound2
+
+[ -f package.json ] || npm init -y
+npm i --save-exact remotion @remotion/cli @remotion/google-fonts react react-dom
+npm i -D typescript @types/react
+npm pkg set scripts.studio="remotion studio src/index.ts" \
+            scripts.render="remotion render src/index.ts FinanceVideo out/finance.mp4"
+
+npx remotion browser ensure || true
+
+echo
+echo "Setup done. Render with:  npm run render"
+echo "Output file: out/finance.mp4"
